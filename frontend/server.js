@@ -9,7 +9,7 @@ const { MongoClient } = require('mongodb');
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const engine = 'mongodb';
-const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
+const mongoUri = process.env.MONGODB_URI || (process.env.VERCEL ? '' : 'mongodb://127.0.0.1:27017');
 const dbName = process.env.DB_NAME || 'HotelManagementDB';
 const scrypt = promisify(crypto.scrypt);
 const sessionCookie = 'hotel_session';
@@ -19,14 +19,37 @@ app.use(express.json());
 
 let mongoClient;
 let mongoDb;
+let mongoConnection;
 
 async function getDb() {
-  if (!mongoDb) {
-    mongoClient = mongoClient || new MongoClient(mongoUri);
-    await mongoClient.connect();
-    mongoDb = mongoClient.db(dbName);
+  if (mongoDb) return mongoDb;
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI must be configured in the Vercel project environment.');
   }
-  return mongoDb;
+  if (process.env.VERCEL) {
+    let hostname;
+    try {
+      hostname = new URL(mongoUri).hostname.toLowerCase();
+    } catch {
+      throw new Error('MONGODB_URI must be a valid MongoDB connection string.');
+    }
+    if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname)) {
+      throw new Error('MONGODB_URI on Vercel must point to a hosted MongoDB server, not localhost.');
+    }
+  }
+  mongoClient = mongoClient || new MongoClient(mongoUri);
+  if (!mongoConnection) {
+    mongoConnection = mongoClient.connect()
+      .then((client) => {
+        mongoDb = client.db(dbName);
+        return mongoDb;
+      })
+      .catch((err) => {
+        mongoConnection = null;
+        throw err;
+      });
+  }
+  return mongoConnection;
 }
 
 function dateOnly(value) {
@@ -507,15 +530,32 @@ app.use((err, _req, res, _next) => {
   res.status(400).json({ error: message });
 });
 
+let databaseInitialization;
+
+function initializeDatabase() {
+  if (!databaseInitialization) {
+    databaseInitialization = getDb()
+      .then((db) => seedDatabase(db))
+      .catch((err) => {
+        databaseInitialization = null;
+        throw err;
+      });
+  }
+  return databaseInitialization;
+}
+
 async function start() {
-  const db = await getDb();
-  await seedDatabase(db);
+  await initializeDatabase();
   app.listen(port, () => {
     console.log(`Hotel Management System running at http://localhost:${port} (mongodb)`);
   });
 }
 
-start().catch((err) => {
-  console.error('Failed to start MongoDB server:', err);
-  process.exit(1);
-});
+if (require.main === module) {
+  start().catch((err) => {
+    console.error('Failed to start MongoDB server:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { app, initializeDatabase };

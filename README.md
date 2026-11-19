@@ -39,6 +39,15 @@ The frontend uses **React** (Vite for local development). The Node.js/Express AP
 
 For a production-style run, use `npm run build` and then `npm start`; Express serves the compiled React app and API on port `3000`.
 
+### Deploy to Vercel
+
+1. Set the Vercel project **Root Directory** to `frontend`.
+2. Add `MONGODB_URI` in the Vercel project’s Environment Variables using the connection string for a hosted MongoDB deployment, such as MongoDB Atlas. Do not use `localhost` or `127.0.0.1`; those refer to the Vercel function itself. Add `DB_NAME=HotelManagementDB` if you want to set the database name explicitly.
+3. Ensure the MongoDB deployment permits connections from Vercel. If using an Atlas IP access list, configure an appropriate Vercel egress IP where available. For deployments without fixed egress IPs, Atlas may require allowing connections from any IP (`0.0.0.0/0`); use a dedicated database user with a strong password and least-privilege access.
+4. Redeploy after saving the environment variables.
+
+Vercel builds the Vite frontend and serves `/api/*` through the serverless function in `frontend/api/`. The local `.env` file is not uploaded to Vercel.
+
 ### Guest accounts
 
 Guests can create an account with their name, email, and a password of at least 8 characters, then log in using that email and password. Passwords are stored as salted scrypt hashes. Login uses an HTTP-only session cookie backed by MongoDB; sessions expire after 7 days, and logging out removes the current session.
