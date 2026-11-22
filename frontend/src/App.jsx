@@ -44,10 +44,15 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState('success');
   const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
 
   function notify(text, type = 'success') { setMessage(text); setMessageType(type); }
 
   async function load(name = page) {
+    if (['Dashboard', 'Reservations', 'Guests', 'Payments'].includes(name) && user?.role !== 'staff') {
+      if (authChecked) setPage('Staff Log In');
+      return;
+    }
     try {
       if (name === 'Home' || name === 'Rooms') {
         const data = await api('/api/rooms');
@@ -63,14 +68,14 @@ export default function App() {
     } catch (error) { notify(error.message, 'error'); }
   }
 
-  useEffect(() => { load(page); }, [page]);
+  useEffect(() => { load(page); }, [page, user, authChecked]);
 
   useEffect(() => {
     api('/api/auth/me')
       .then((data) => setUser(data.user))
       .catch((error) => {
         if (error.status !== 401) notify(error.message, 'error');
-      });
+      }).finally(() => setAuthChecked(true));
   }, []);
 
   async function logIn(event) {
@@ -82,6 +87,18 @@ export default function App() {
       setUser(data.user);
       setPage('Rooms');
       notify(`Welcome back, ${data.user.first_name}.`);
+    } catch (error) { notify(error.message, 'error'); }
+  }
+
+  async function staffLogIn(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const payload = Object.fromEntries(new FormData(form));
+    try {
+      const data = await api('/api/auth/staff-login', { method: 'POST', body: JSON.stringify(payload) });
+      setUser(data.user);
+      setPage('Dashboard');
+      notify(`Welcome, ${data.user.first_name}.`);
     } catch (error) { notify(error.message, 'error'); }
   }
 
@@ -182,6 +199,8 @@ export default function App() {
 
       {page === 'Log In' && <section className="auth-page"><form className="auth-card" onSubmit={logIn}><span className="eyebrow">WELCOME BACK</span><h1>Log In</h1><p>Sign in to manage your hotel stay.</p><label>Email<input name="email" type="email" autoComplete="email" required placeholder="Email" /></label><label>Password<input name="password" type="password" autoComplete="current-password" required placeholder="Password" /></label><button className="auth-submit">LOG IN</button><div className="auth-switch">New to JNU Hotels? <button type="button" onClick={() => setPage('Sign Up')}>Create an account</button></div></form></section>}
 
+      {page === 'Staff Log In' && <section className="auth-page"><form className="auth-card" onSubmit={staffLogIn}><span className="eyebrow">STAFF ACCESS</span><h1>Staff Log In</h1><p>Sign in to manage hotel operations.</p><label>Email<input name="email" type="email" autoComplete="username" required placeholder="Staff email" /></label><label>Password<input name="password" type="password" autoComplete="current-password" required placeholder="Password" /></label><button className="auth-submit">STAFF LOG IN</button><div className="auth-switch"><button type="button" onClick={() => setPage('Home')}>Back to home</button></div></form></section>}
+
       {page === 'Sign Up' && <section className="auth-page"><form className="auth-card signup-card" onSubmit={signUp}><span className="eyebrow">JOIN JNU HOTELS</span><h1>Sign Up</h1><p>Create an account to start planning your stay.</p><label>Full name<input name="full_name" autoComplete="name" required placeholder="Full name" /></label><label>Email<input name="email" type="email" autoComplete="email" required placeholder="Email" /></label><label>Phone<input name="phone" type="tel" autoComplete="tel" placeholder="Phone (optional)" /></label><label>Password<input name="password" type="password" autoComplete="new-password" minLength="8" required placeholder="At least 8 characters" /></label><button className="auth-submit">SIGN UP</button><div className="auth-switch">Already have an account? <button type="button" onClick={() => setPage('Log In')}>Log in</button></div></form></section>}
 
       {page === 'Reservations' && <section className="content-page staff-page"><PageHeading eyebrow="STAFF CONSOLE" title="Reservations" text="Create a stay and review recent bookings." /><form className="staff-form" onSubmit={(e) => submit(e, '/api/reservations', 'Reservation created.', async () => { await load('Reservations'); await load('Dashboard'); })}><h2>New reservation</h2><label>Guest<select name="guest_id" required defaultValue=""><option value="" disabled>Choose guest</option>{bookingOptions.guests.map((g) => <option key={g.guest_id} value={g.guest_id}>{g.first_name} {g.last_name}</option>)}</select></label><label>Room<select name="room_id" required value={selectedRoom} onChange={(e) => setSelectedRoom(e.target.value)}><option value="" disabled>Choose room</option>{bookingOptions.rooms.map((r) => <option key={r.room_id} value={r.room_id}>Room {r.room_number} · {r.room_type} · {money(r.nightly_rate)}/night</option>)}</select></label><label>Check-in<input name="check_in" type="date" required /></label><label>Check-out<input name="check_out" type="date" required /></label><label>Adults<input name="adults" type="number" min="1" defaultValue="1" required /></label><label>Children<input name="children" type="number" min="0" defaultValue="0" /></label><label className="span-two">Special request<input name="requests" /></label><button className="primary-button">Create reservation</button></form><section className="staff-list"><h2>Recent reservations</h2><Table columns={reservationColumns} rows={reservations} /></section></section>}
@@ -193,6 +212,6 @@ export default function App() {
       {page === 'Payments' && <section className="content-page staff-page"><PageHeading eyebrow="STAFF CONSOLE" title="Payments" text="Recent payments recorded for reservations." /><section className="staff-list"><Table columns={[{ label: 'PAYMENT', render: (p) => `#${p.payment_id}` }, { label: 'GUEST', render: (p) => p.guest_name }, { label: 'RESERVATION', render: (p) => `#${p.reservation_id}` }, { label: 'DATE', render: (p) => date(p.payment_date) }, { label: 'METHOD', render: (p) => p.payment_method }, { label: 'AMOUNT', render: (p) => money(p.amount) }]} rows={payments} /></section></section>}
     </main>
 
-    <footer className="site-footer"><div className="footer-columns"><div><h3>About Us</h3><button onClick={() => setPage('About')}>Our story</button><button onClick={() => setPage('Rooms')}>Rooms</button><button onClick={() => setPage('Contact Us')}>Contact</button></div><div><h3>Services</h3><span>Comfortable stays</span><span>Guest support</span><span>Room reservations</span></div><div><h3>Contact Us</h3><span>Uttar Pradesh</span><span>India</span><span>hello@jnuhotels.example</span></div><div><h3>Follow Along</h3><span>◎ Instagram</span><span>f Facebook</span><span>▶ Youtube</span><button className="staff-link" onClick={() => setPage('Dashboard')}>Staff console →</button></div></div><div className="copyright">JNU Hotels · Your stay, your way</div></footer>
+    <footer className="site-footer"><div className="footer-columns"><div><h3>About Us</h3><button onClick={() => setPage('About')}>Our story</button><button onClick={() => setPage('Rooms')}>Rooms</button><button onClick={() => setPage('Contact Us')}>Contact</button></div><div><h3>Services</h3><span>Comfortable stays</span><span>Guest support</span><span>Room reservations</span></div><div><h3>Contact Us</h3><span>Uttar Pradesh</span><span>India</span><span>hello@jnuhotels.example</span></div><div><h3>Follow Along</h3><span>◎ Instagram</span><span>f Facebook</span><span>▶ Youtube</span><button className="staff-link" onClick={() => setPage(user?.role === 'staff' ? 'Dashboard' : 'Staff Log In')}>Staff console →</button></div></div><div className="copyright">JNU Hotels · Your stay, your way</div></footer>
   </div>;
 }
