@@ -14,6 +14,8 @@ const dbName = process.env.DB_NAME || 'HotelManagementDB';
 const scrypt = promisify(crypto.scrypt);
 const sessionCookie = 'hotel_session';
 const sessionLifetime = 7 * 24 * 60 * 60 * 1000;
+const staffEmail = (process.env.STAFF_EMAIL || '').trim().toLowerCase();
+const staffPassword = process.env.STAFF_PASSWORD || '';
 
 app.use(express.json());
 
@@ -112,15 +114,25 @@ async function seedDatabase(db) {
     payments.createIndex({ payment_id: 1 }, { unique: true }),
     payments.createIndex({ reservation_id: 1 })
   ]);
+
+  const counters = db.collection('counters');
+  for (const [collection, field] of [[guests, 'guest_id'], [rooms, 'room_id'], [reservations, 'reservation_id'], [payments, 'payment_id']]) {
+    const last = await collection.findOne({}, { projection: { [field]: 1 }, sort: { [field]: -1 } });
+    await counters.updateOne({ _id: field }, { $max: { value: last?.[field] || 0 } }, { upsert: true });
+  }
+  await db.collection('reservation_nights').createIndex({ room_id: 1, night: 1 }, { unique: true });
 }
 
-async function nextId(collection, field) {
-  const last = await collection.findOne({}, { projection: { [field]: 1 }, sort: { [field]: -1 } });
-  return (last?.[field] || 0) + 1;
+async function nextId(db, field) {
+  const result = await db.collection('counters').findOneAndUpdate(
+    { _id: field }, { $inc: { value: 1 } }, { upsert: true, returnDocument: 'after' }
+  );
+  return result.value;
 }
 
 function publicUser(guest) {
   return {
+    role: 'guest',
     guest_id: guest.guest_id,
     first_name: guest.first_name,
     last_name: guest.last_name,
@@ -172,7 +184,24 @@ async function findSessionUser(db, req) {
     expires_at: { $gt: new Date() }
   });
   if (!session) return null;
+  if (session.role === 'staff') {
+    return { role: 'staff', email: session.email, first_name: process.env.STAFF_NAME || 'Staff' };
+  }
   return db.collection('guests').findOne({ guest_id: session.guest_id });
+}
+
+async function requireStaff(req, res, next) {
+  if (!staffEmail || !staffPassword) {
+    return res.status(503).json({ error: 'Staff access is not configured. Set STAFF_EMAIL and STAFF_PASSWORD.' });
+  }
+  try {
+    const db = await getDb();
+    const session = await findSessionUser(db, req);
+    if (session?.role === 'staff') return next();
+    return res.status(401).json({ error: 'Staff sign-in required.' });
+  } catch (error) {
+    return next(error);
+  }
 }
 
 async function getReservationSummary(db, reservation) {
@@ -208,7 +237,7 @@ app.get('/api/health', asyncRoute(async (_req, res) => {
   res.json({ ok: true, database: engine });
 }));
 
-app.get('/api/dashboard', asyncRoute(async (_req, res) => {
+app.get('/api/dashboard', requireStaff, asyncRoute(async (_req, res) => {
   const db = await getDb();
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -295,7 +324,7 @@ app.get('/api/rooms', asyncRoute(async (_req, res) => {
   })));
 }));
 
-app.get('/api/guests', asyncRoute(async (_req, res) => {
+app.get('/api/guests', requireStaff, asyncRoute(async (_req, res) => {
   const db = await getDb();
   const guests = await db.collection('guests').find().sort({ last_name: 1, first_name: 1 }).toArray();
   const counts = await db.collection('reservations').aggregate([
@@ -312,7 +341,7 @@ app.get('/api/guests', asyncRoute(async (_req, res) => {
   })));
 }));
 
-app.post('/api/guests', asyncRoute(async (req, res) => {
+app.post('/api/guests', requireStaff, asyncRoute(async (req, res) => {
   const { first_name, last_name, email, phone, address } = req.body;
   if (!first_name?.trim() || !last_name?.trim() || !email?.trim()) {
     return res.status(400).json({ error: 'First name, last name, and email are required.' });
@@ -320,10 +349,10 @@ app.post('/api/guests', asyncRoute(async (req, res) => {
   const db = await getDb();
   const guests = db.collection('guests');
   await guests.insertOne({
-    guest_id: await nextId(guests, 'guest_id'),
+    guest_id: await nextId(db, 'guest_id'),
     first_name: first_name.trim(),
     last_name: last_name.trim(),
-    email: email.trim(),
+    email: email.trim().toLowerCase(),
     phone: phone?.trim() || null,
     address: address?.trim() || null,
     created_at: new Date()
@@ -345,7 +374,7 @@ app.post('/api/auth/signup', asyncRoute(async (req, res) => {
   const salt = crypto.randomBytes(16);
   const passwordHash = await scrypt(password, salt, 64);
   const guest = {
-    guest_id: await nextId(guests, 'guest_id'),
+    guest_id: await nextId(db, 'guest_id'),
     first_name: first_name.trim(),
     last_name: last_name.trim(),
     email: normalizedEmail,
@@ -382,11 +411,30 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   res.json({ user: publicUser(guest) });
 }));
 
+app.post('/api/auth/staff-login', asyncRoute(async (req, res) => {
+  const { email, password } = req.body;
+  if (!staffEmail || !staffPassword) {
+    return res.status(503).json({ error: 'Staff access is not configured. Set STAFF_EMAIL and STAFF_PASSWORD.' });
+  }
+  if (typeof email !== 'string' || typeof password !== 'string' || email.trim().toLowerCase() !== staffEmail || password !== staffPassword) {
+    return res.status(401).json({ error: 'Email or password is incorrect.' });
+  }
+  const db = await getDb();
+  const token = crypto.randomBytes(32).toString('hex');
+  await db.collection('auth_sessions').insertOne({
+    token_hash: crypto.createHash('sha256').update(token).digest('hex'),
+    role: 'staff', email: staffEmail,
+    expires_at: new Date(Date.now() + sessionLifetime)
+  });
+  setSessionCookie(res, token);
+  res.json({ user: { role: 'staff', email: staffEmail, first_name: process.env.STAFF_NAME || 'Staff' } });
+}));
+
 app.get('/api/auth/me', asyncRoute(async (req, res) => {
   const db = await getDb();
   const guest = await findSessionUser(db, req);
   if (!guest) return res.status(401).json({ error: 'You are not logged in.' });
-  res.json({ user: publicUser(guest) });
+  res.json({ user: guest.role === 'staff' ? guest : publicUser(guest) });
 }));
 
 app.post('/api/auth/logout', asyncRoute(async (req, res) => {
@@ -400,7 +448,7 @@ app.post('/api/auth/logout', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.get('/api/reservations', asyncRoute(async (_req, res) => {
+app.get('/api/reservations', requireStaff, asyncRoute(async (_req, res) => {
   const db = await getDb();
   const reservations = await db.collection('reservations').find().sort({ check_in_date: -1 }).limit(100).toArray();
   const summaries = [];
@@ -410,7 +458,7 @@ app.get('/api/reservations', asyncRoute(async (_req, res) => {
   res.json(summaries);
 }));
 
-app.get('/api/booking-options', asyncRoute(async (_req, res) => {
+app.get('/api/booking-options', requireStaff, asyncRoute(async (_req, res) => {
   const db = await getDb();
   const guests = await db.collection('guests').find({}, {
     projection: { guest_id: 1, first_name: 1, last_name: 1, email: 1 }
@@ -419,7 +467,7 @@ app.get('/api/booking-options', asyncRoute(async (_req, res) => {
   res.json({ guests, rooms });
 }));
 
-app.post('/api/reservations', asyncRoute(async (req, res) => {
+app.post('/api/reservations', requireStaff, asyncRoute(async (req, res) => {
   const { guest_id, room_id, check_in, check_out, adults, children, requests } = req.body;
   if (![guest_id, room_id, adults].every((n) => Number.isInteger(Number(n))) || !check_in || !check_out) {
     return res.status(400).json({ error: 'Choose a guest, room, valid dates, and adult count.' });
@@ -441,7 +489,11 @@ app.post('/api/reservations', asyncRoute(async (req, res) => {
   }
   const room = await rooms.findOne({ room_id: numericRoomId, room_status: 'Available' });
   if (!room) return res.status(400).json({ error: 'Room is unavailable.' });
-  if (Number(adults) > room.capacity) return res.status(400).json({ error: `Room capacity is ${room.capacity} guests.` });
+  const adultCount = Number(adults);
+  const childCount = Number(children || 0);
+  if (adultCount < 1 || !Number.isInteger(childCount) || childCount < 0 || adultCount + childCount > room.capacity) {
+    return res.status(400).json({ error: `Room capacity is ${room.capacity} guests.` });
+  }
 
   const overlap = await reservations.findOne({
     room_id: numericRoomId,
@@ -451,23 +503,40 @@ app.post('/api/reservations', asyncRoute(async (req, res) => {
   });
   if (overlap) return res.status(400).json({ error: 'The room is already reserved for these dates.' });
 
-  const reservationId = await nextId(reservations, 'reservation_id');
-  await reservations.insertOne({
+  const reservationId = await nextId(db, 'reservation_id');
+  const attemptId = crypto.randomUUID();
+  const nights = [];
+  for (let night = new Date(checkIn); night < checkOut; night.setUTCDate(night.getUTCDate() + 1)) {
+    nights.push({ room_id: numericRoomId, night: new Date(night), attempt_id: attemptId });
+  }
+  try {
+    await db.collection('reservation_nights').insertMany(nights);
+  } catch (error) {
+    await db.collection('reservation_nights').deleteMany({ attempt_id: attemptId });
+    if (error?.code === 11000) return res.status(400).json({ error: 'The room is already reserved for these dates.' });
+    throw error;
+  }
+  try {
+    await reservations.insertOne({
     reservation_id: reservationId,
     guest_id: numericGuestId,
     room_id: numericRoomId,
     check_in_date: checkIn,
     check_out_date: checkOut,
-    adults: Number(adults),
-    children: Number(children || 0),
+    adults: adultCount,
+    children: childCount,
     reservation_status: 'Booked',
     special_requests: requests || null,
     created_at: new Date()
-  });
+    });
+  } catch (error) {
+    await db.collection('reservation_nights').deleteMany({ attempt_id: attemptId });
+    throw error;
+  }
   res.status(201).json({ reservation_id: reservationId });
 }));
 
-app.post('/api/payments', asyncRoute(async (req, res) => {
+app.post('/api/payments', requireStaff, asyncRoute(async (req, res) => {
   const { reservation_id, amount, payment_method, transaction_reference } = req.body;
   if (!Number.isInteger(Number(reservation_id)) || !Number.isFinite(Number(amount)) || Number(amount) <= 0 || !payment_method) {
     return res.status(400).json({ error: 'Enter a reservation, positive amount, and payment method.' });
@@ -479,7 +548,7 @@ app.post('/api/payments', asyncRoute(async (req, res) => {
   }
   const payments = db.collection('payments');
   await payments.insertOne({
-    payment_id: await nextId(payments, 'payment_id'),
+    payment_id: await nextId(db, 'payment_id'),
     reservation_id: Number(reservation_id),
     amount: Number(amount),
     payment_method,
@@ -490,7 +559,7 @@ app.post('/api/payments', asyncRoute(async (req, res) => {
   res.status(201).json({ ok: true });
 }));
 
-app.get('/api/payments', asyncRoute(async (_req, res) => {
+app.get('/api/payments', requireStaff, asyncRoute(async (_req, res) => {
   const db = await getDb();
   const payments = await db.collection('payments').find().sort({ payment_date: -1 }).limit(100).toArray();
   const result = [];
